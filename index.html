@@ -1,0 +1,1292 @@
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import {
+  Gauge,
+  Plus,
+  Trash2,
+  ArrowUp,
+  ArrowDown,
+  ArrowRight,
+  ArrowLeft,
+  Download,
+  Ruler,
+  RotateCcw,
+  Layers,
+  CheckCircle2,
+  CornerUpRight,
+  CornerDownRight,
+  ZoomIn,
+  ZoomOut,
+  Maximize2
+} from 'lucide-react';
+
+// ============================================================================
+// Exakte Nennweiten- & Komponentendefinitionen
+// ============================================================================
+const DN_OPTIONS = [25, 50, 80, 100, 125, 150, 200, 250, 400];
+const G_SIZE_OPTIONS = ['G65', 'G100', 'G160', 'G250', 'G400', 'G650'];
+const METER_MODELS = ['Elster DKZ', 'Rabo', 'IRM-3 Duo'];
+
+const COMPONENT_CATALOG = [
+  { typ: 'Absperrarmatur', label: 'Armatur', defaultLen: 0, inChain: false },
+  { typ: 'Reduzierung', label: 'Reduzierung', defaultLen: 150, inChain: true },
+  { typ: 'Kompensator', label: 'Kompensator', defaultLen: 150, inChain: true },
+  { typ: 'Gaszähler', label: 'Zähler', defaultLen: 171, inChain: true },
+  { typ: '90°-Bogen', label: '90°-Bogen', defaultLen: 200, inChain: true },
+  { typ: 'Passstück', label: 'Passstück', defaultLen: 200, inChain: true }
+];
+
+// Richtungsvektoren für die 2D-Pfadlogik
+const DIR_VECTORS = {
+  right: { dx: 1, dy: 0, label: 'Horizontal' },
+  left: { dx: -1, dy: 0, label: 'Horizontal (←)' },
+  up: { dx: 0, dy: -1, label: 'Vertikal (↑)' },
+  down: { dx: 0, dy: 1, label: 'Vertikal (↓)' }
+};
+
+function getAvailableBendDirections(incomingDir) {
+  if (incomingDir === 'right' || incomingDir === 'left') {
+    return [
+      { value: 'up', label: 'Nach oben (↑)' },
+      { value: 'down', label: 'Nach unten (↓)' }
+    ];
+  }
+  return [
+    { value: 'right', label: 'Nach rechts (→)' },
+    { value: 'left', label: 'Nach links (←)' }
+  ];
+}
+
+function resolveBendOutDir(incomingDir, bendDir) {
+  const valid = getAvailableBendDirections(incomingDir).map((d) => d.value);
+  if (valid.includes(bendDir)) return bendDir;
+  return valid[0];
+}
+
+function getPipeHalfHeight(dn) {
+  const idx = DN_OPTIONS.indexOf(Number(dn));
+  if (idx === -1) return 18;
+  return 13 + idx * 2.5;
+}
+
+// ============================================================================
+// 2D-Pfad- & Bounding-Box-Berechnung für alle Bauteile
+// ============================================================================
+function compute2DLayout(items, startDir) {
+  const STEP_LEN = 144;
+  const BEND_ARM = 72;
+
+  let curX = 0;
+  let curY = 0;
+  let curDir = startDir;
+
+  const nodes = items.map((item, idx) => {
+    const inDir = curDir;
+    const inVec = DIR_VECTORS[inDir];
+
+    if (item.typ === '90°-Bogen') {
+      const outDir = resolveBendOutDir(inDir, item.bendDir);
+      const outVec = DIR_VECTORS[outDir];
+
+      const pIn = { x: curX, y: curY };
+      const pCorner = {
+        x: curX + inVec.dx * BEND_ARM,
+        y: curY + inVec.dy * BEND_ARM
+      };
+      const pOut = {
+        x: pCorner.x + outVec.dx * BEND_ARM,
+        y: pCorner.y + outVec.dy * BEND_ARM
+      };
+
+      curX = pOut.x;
+      curY = pOut.y;
+      curDir = outDir;
+
+      return {
+        item,
+        idx,
+        isBend: true,
+        inDir,
+        outDir,
+        pIn,
+        pCorner,
+        pOut,
+        center: pCorner
+      };
+    } else {
+      const pIn = { x: curX, y: curY };
+      const pOut = {
+        x: curX + inVec.dx * STEP_LEN,
+        y: curY + inVec.dy * STEP_LEN
+      };
+      const center = {
+        x: (pIn.x + pOut.x) / 2,
+        y: (pIn.y + pOut.y) / 2
+      };
+
+      curX = pOut.x;
+      curY = pOut.y;
+
+      return {
+        item,
+        idx,
+        isBend: false,
+        inDir,
+        outDir: inDir,
+        pIn,
+        pOut,
+        center
+      };
+    }
+  });
+
+  let minX = -90;
+  let maxX = 90;
+  let minY = -90;
+  let maxY = 90;
+
+  if (nodes.length > 0) {
+    minX = Infinity;
+    maxX = -Infinity;
+    minY = Infinity;
+    maxY = -Infinity;
+
+    nodes.forEach((n) => {
+      const pts = n.isBend ? [n.pIn, n.pCorner, n.pOut] : [n.pIn, n.pOut];
+      pts.forEach((pt) => {
+        minX = Math.min(minX, pt.x - 125);
+        maxX = Math.max(maxX, pt.x + 135);
+        minY = Math.min(minY, pt.y - 105);
+        maxY = Math.max(maxY, pt.y + 105);
+      });
+    });
+  }
+
+  return {
+    nodes,
+    startPoint: { x: 0, y: 0, dir: startDir },
+    endPoint: { x: curX, y: curY, dir: curDir },
+    bounds: { minX, maxX, minY, maxY }
+  };
+}
+
+// ============================================================================
+// 2D-Bauteil-Renderer (Gerade Bauteile + 90°-Bögen + gut lesbare Beschriftung)
+// ============================================================================
+function SchematicNode({ node, isSelected, onSelect }) {
+  const { item, isBend, inDir, outDir, pIn, pCorner, pOut, center } = node;
+  const h1 = getPipeHalfHeight(item.dnIn);
+  const h2 = getPipeHalfHeight(item.dnOut);
+  const isLoose = item.tag === 'Loser Flansch';
+
+  if (isBend) {
+    const inVec = DIR_VECTORS[inDir];
+    const outVec = DIR_VECTORS[outDir];
+    const angleIn = inDir === 'right' ? 0 : inDir === 'down' ? 90 : inDir === 'left' ? 180 : -90;
+    const angleOut = outDir === 'right' ? 0 : outDir === 'down' ? 90 : outDir === 'left' ? 180 : -90;
+
+    const nIn = { x: -inVec.dy, y: inVec.dx };
+    const nOut = { x: -outVec.dy, y: outVec.dx };
+    const dot = nIn.x * outVec.dx + nIn.y * outVec.dy;
+    const sign = dot >= 0 ? 1 : -1;
+
+    const p1A = { x: pIn.x + nIn.x * h1 * sign, y: pIn.y + nIn.y * h1 * sign };
+    const p1B = { x: pIn.x - nIn.x * h1 * sign, y: pIn.y - nIn.y * h1 * sign };
+    const p2A = { x: pOut.x + nOut.x * h1 * sign, y: pOut.y + nOut.y * h1 * sign };
+    const p2B = { x: pOut.x - nOut.x * h1 * sign, y: pOut.y - nOut.y * h1 * sign };
+
+    const cA = {
+      x: pCorner.x + (nIn.x * sign + nOut.x * sign) * h1 * 0.55,
+      y: pCorner.y + (nIn.y * sign + nOut.y * sign) * h1 * 0.55
+    };
+    const cB = {
+      x: pCorner.x - (nIn.x * sign + nOut.x * sign) * h1 * 0.55,
+      y: pCorner.y - (nIn.y * sign + nOut.y * sign) * h1 * 0.55
+    };
+
+    const labelOffsetX = (-inVec.dx - outVec.dx) * 38;
+    const labelOffsetY = (-inVec.dy - outVec.dy) * 38;
+
+    return (
+      <g onClick={onSelect} className="cursor-pointer">
+        {isSelected && (
+          <circle
+            cx={pCorner.x}
+            cy={pCorner.y}
+            r={62}
+            fill="rgba(245, 158, 11, 0.16)"
+            stroke="#d97706"
+            strokeWidth={2.5}
+            strokeDasharray="6 3"
+          />
+        )}
+
+        <path
+          d={`M ${p1A.x} ${p1A.y} Q ${cA.x} ${cA.y} ${p2A.x} ${p2A.y} L ${p2B.x} ${p2B.y} Q ${cB.x} ${cB.y} ${p1B.x} ${p1B.y} Z`}
+          fill="#f8fafc"
+          stroke="#0f172a"
+          strokeWidth={2}
+        />
+
+        <path
+          d={`M ${pIn.x} ${pIn.y} Q ${pCorner.x} ${pCorner.y} ${pOut.x} ${pOut.y}`}
+          fill="none"
+          stroke="#64748b"
+          strokeWidth={1.2}
+          strokeDasharray="4 3"
+        />
+
+        <g transform={`translate(${pIn.x}, ${pIn.y}) rotate(${angleIn})`}>
+          <rect
+            x={0}
+            y={-h1 - 10}
+            width={7}
+            height={(h1 + 10) * 2}
+            fill={isLoose ? '#dbeafe' : '#e2e8f0'}
+            stroke="#0f172a"
+            strokeWidth={1.8}
+          />
+        </g>
+
+        <g transform={`translate(${pOut.x}, ${pOut.y}) rotate(${angleOut})`}>
+          <rect
+            x={-7}
+            y={-h1 - 10}
+            width={7}
+            height={(h1 + 10) * 2}
+            fill={isLoose ? '#dbeafe' : '#e2e8f0'}
+            stroke="#0f172a"
+            strokeWidth={1.8}
+          />
+        </g>
+
+        <g transform={`translate(${pCorner.x + labelOffsetX}, ${pCorner.y + labelOffsetY})`}>
+          <rect x={-64} y={-22} width={128} height={42} rx={6} fill="#ffffff" stroke="#94a3b8" strokeWidth={1.4} />
+          <text x={0} y={-5} fontSize={11.5} fontWeight="bold" fill="#0f172a" textAnchor="middle">
+            90°-Bogen DN{item.dnIn}
+          </text>
+          {item.inChain && (
+            <text x={0} y={13} fontSize={12} fontWeight="bold" fill="#b45309" textAnchor="middle">
+              {item.length} mm
+            </text>
+          )}
+        </g>
+      </g>
+    );
+  }
+
+  const isVerticalSeg = inDir === 'up' || inDir === 'down';
+  const angle = inDir === 'right' ? 0 : inDir === 'down' ? 90 : inDir === 'left' ? 180 : -90;
+  const w = 144;
+  const halfW = w / 2;
+
+  const dimOffset = isVerticalSeg ? 74 : 68;
+  const labelOffset = isVerticalSeg ? -62 : -56;
+
+  return (
+    <g onClick={onSelect} className="cursor-pointer">
+      <g transform={`translate(${center.x}, ${center.y}) rotate(${angle})`}>
+        {isSelected && (
+          <rect
+            x={-halfW + 2}
+            y={-48}
+            width={w - 4}
+            height={96}
+            rx={8}
+            fill="rgba(245, 158, 11, 0.16)"
+            stroke="#d97706"
+            strokeWidth={2.5}
+            strokeDasharray="6 3"
+          />
+        )}
+
+        {/* Eingangsflansch */}
+        <rect
+          x={-halfW}
+          y={-h1 - 10}
+          width={7}
+          height={(h1 + 10) * 2}
+          fill={isLoose ? '#dbeafe' : '#e2e8f0'}
+          stroke="#0f172a"
+          strokeWidth={1.8}
+        />
+
+        {/* Ausgangsflansch */}
+        <rect
+          x={halfW - 7}
+          y={-h2 - 10}
+          width={7}
+          height={(h2 + 10) * 2}
+          fill={isLoose ? '#dbeafe' : '#e2e8f0'}
+          stroke="#0f172a"
+          strokeWidth={1.8}
+        />
+
+        {item.typ === 'Absperrarmatur' && (
+          <g>
+            <polygon
+              points={`${-halfW + 9},-22 0,0 ${-halfW + 9},22`}
+              fill="#f1f5f9"
+              stroke="#0f172a"
+              strokeWidth={2}
+            />
+            <polygon
+              points={`${halfW - 9},-22 0,0 ${halfW - 9},22`}
+              fill="#f1f5f9"
+              stroke="#0f172a"
+              strokeWidth={2}
+            />
+            <circle cx={0} cy={0} r={8} fill="#ffffff" stroke="#0f172a" strokeWidth={2} />
+          </g>
+        )}
+
+        {item.typ === 'Reduzierung' && (
+          <polygon
+            points={`${-halfW + 7},${-h1} ${halfW - 7},${-h2} ${halfW - 7},${h2} ${-halfW + 7},${h1}`}
+            fill="#f8fafc"
+            stroke="#0f172a"
+            strokeWidth={2}
+          />
+        )}
+
+        {item.typ === 'Kompensator' && (
+          <g>
+            <rect
+              x={-halfW + 8}
+              y={-h1}
+              width={w - 16}
+              height={h1 * 2}
+              fill="#fefce8"
+              stroke="#0f172a"
+              strokeWidth={1.8}
+            />
+            {[-38, -19, 0, 19, 38].map((wx) => (
+              <line
+                key={wx}
+                x1={wx}
+                y1={-h1 - 7}
+                x2={wx}
+                y2={h1 + 7}
+                stroke="#92400e"
+                strokeWidth={2.5}
+              />
+            ))}
+          </g>
+        )}
+
+        {item.typ === 'Gaszähler' && (
+          <rect
+            x={-halfW + 10}
+            y={-34}
+            width={w - 20}
+            height={68}
+            rx={6}
+            fill="#eff6ff"
+            stroke="#1d4ed8"
+            strokeWidth={2.4}
+          />
+        )}
+
+        {item.typ === 'Passstück' && (
+          <rect
+            x={-halfW + 7}
+            y={-h1}
+            width={w - 14}
+            height={h1 * 2}
+            fill="#f8fafc"
+            stroke="#0f172a"
+            strokeWidth={2}
+          />
+        )}
+      </g>
+
+      {/* Aufrechte Beschriftung */}
+      {item.typ === 'Gaszähler' ? (
+        <g transform={`translate(${center.x}, ${center.y})`}>
+          <text x={0} y={-11} fontSize={11} fontWeight="bold" fill="#1e3a8a" textAnchor="middle">
+            {item.meterModel || 'Zähler'}
+          </text>
+          <text x={0} y={6} fontSize={14} fontWeight="bold" fill="#0f172a" textAnchor="middle">
+            {item.gSize || 'G100'}
+          </text>
+          <text x={0} y={22} fontSize={11} fontWeight="bold" fill="#334155" textAnchor="middle">
+            DN {item.dnIn} • PN{item.pn}
+          </text>
+        </g>
+      ) : (
+        <g
+          transform={
+            isVerticalSeg
+              ? `translate(${center.x + labelOffset}, ${center.y})`
+              : `translate(${center.x}, ${center.y + labelOffset})`
+          }
+        >
+          <text
+            x={0}
+            y={0}
+            fontSize={12}
+            fontWeight="bold"
+            fill="#0f172a"
+            textAnchor={isVerticalSeg ? 'end' : 'middle'}
+          >
+            {item.typ === 'Reduzierung'
+              ? `Red. ${item.dnIn}/${item.dnOut} (PN${item.pn})`
+              : `${item.typ === 'Absperrarmatur' ? 'Armatur' : item.typ} DN${item.dnIn} (PN${item.pn})`}
+          </text>
+          {item.tag && (
+            <text
+              x={0}
+              y={15}
+              fontSize={10.5}
+              fontWeight="bold"
+              fill="#b45309"
+              textAnchor={isVerticalSeg ? 'end' : 'middle'}
+            >
+              [{item.tag}]
+            </text>
+          )}
+        </g>
+      )}
+
+      {/* Maßlinie für horizontale Segmente */}
+      {item.inChain && !isVerticalSeg && (
+        <g>
+          <line
+            x1={pIn.x}
+            y1={center.y + 38}
+            x2={pIn.x}
+            y2={center.y + dimOffset + 6}
+            stroke="#64748b"
+            strokeWidth={1.4}
+          />
+          <line
+            x1={pOut.x}
+            y1={center.y + 38}
+            x2={pOut.x}
+            y2={center.y + dimOffset + 6}
+            stroke="#64748b"
+            strokeWidth={1.4}
+          />
+          <line
+            x1={Math.min(pIn.x, pOut.x) + 3}
+            y1={center.y + dimOffset}
+            x2={Math.max(pIn.x, pOut.x) - 3}
+            y2={center.y + dimOffset}
+            stroke="#0f172a"
+            strokeWidth={1.6}
+            markerStart="url(#arrowStart)"
+            markerEnd="url(#arrowEnd)"
+          />
+          <text
+            x={center.x}
+            y={center.y + dimOffset - 8}
+            fontSize={13.5}
+            fontWeight="bold"
+            fill="#0f172a"
+            textAnchor="middle"
+          >
+            {item.length} mm
+          </text>
+        </g>
+      )}
+
+      {/* Maßlinie für vertikale Segmente */}
+      {item.inChain && isVerticalSeg && (
+        <g>
+          <line
+            x1={center.x + 38}
+            y1={pIn.y}
+            x2={center.x + dimOffset + 6}
+            y2={pIn.y}
+            stroke="#64748b"
+            strokeWidth={1.4}
+          />
+          <line
+            x1={center.x + 38}
+            y1={pOut.y}
+            x2={center.x + dimOffset + 6}
+            y2={pOut.y}
+            stroke="#64748b"
+            strokeWidth={1.4}
+          />
+          <line
+            x1={center.x + dimOffset}
+            y1={Math.min(pIn.y, pOut.y) + 3}
+            x2={center.x + dimOffset}
+            y2={Math.max(pIn.y, pOut.y) - 3}
+            stroke="#0f172a"
+            strokeWidth={1.6}
+            markerStart="url(#arrowStart)"
+            markerEnd="url(#arrowEnd)"
+          />
+          <text
+            x={center.x + dimOffset + 9}
+            y={center.y + 5}
+            fontSize={13.5}
+            fontWeight="bold"
+            fill="#0f172a"
+            textAnchor="start"
+          >
+            {item.length} mm
+          </text>
+        </g>
+      )}
+    </g>
+  );
+}
+
+// ============================================================================
+// Smartphone-optimierte Live-2D-Zeichenfläche (100% Einpassen + Zoom)
+// ============================================================================
+function Live2DSchematicCanvas({
+  svgRef,
+  positionNumber,
+  startDir,
+  dichtflaeche,
+  items,
+  totalLength,
+  selectedId,
+  onSelect,
+  zoomLevel
+}) {
+  const layout = useMemo(() => compute2DLayout(items, startDir), [items, startDir]);
+  const { nodes, startPoint, endPoint, bounds } = layout;
+
+  const headerSpace = 80;
+  const contentW = Math.max(460, bounds.maxX - bounds.minX + 44);
+  const contentH = Math.max(250, bounds.maxY - bounds.minY + 36);
+  const svgW = contentW;
+  const svgH = contentH + headerSpace;
+
+  const offsetX = (svgW - (bounds.maxX - bounds.minX)) / 2 - bounds.minX;
+  const offsetY = headerSpace + (contentH - (bounds.maxY - bounds.minY)) / 2 - bounds.minY;
+
+  const startVec = DIR_VECTORS[startPoint.dir];
+  const endVec = DIR_VECTORS[endPoint.dir];
+
+  const isZoomed = zoomLevel > 1;
+
+  return (
+    <div
+      className={`w-full bg-white border-2 border-slate-300 rounded-2xl shadow-sm ${
+        isZoomed ? 'overflow-auto max-h-[62vh]' : 'overflow-hidden'
+      }`}
+    >
+      <svg
+        ref={svgRef}
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox={`0 0 ${svgW} ${svgH}`}
+        preserveAspectRatio="xMidYMid meet"
+        style={{
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+          width: isZoomed ? `${Math.round(zoomLevel * 100)}%` : '100%'
+        }}
+        className={`h-auto block select-none ${
+          isZoomed ? 'max-w-none' : 'w-full max-h-[55vh] sm:max-h-[490px]'
+        }`}
+      >
+        <defs>
+          <pattern id="techGrid2D" width="20" height="20" patternUnits="userSpaceOnUse">
+            <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#f1f5f9" strokeWidth="1" />
+          </pattern>
+          <marker id="arrowStart" markerWidth="8" markerHeight="8" refX="1" refY="4" orient="auto">
+            <path d="M 8 1 L 1 4 L 8 7 Z" fill="#0f172a" />
+          </marker>
+          <marker id="arrowEnd" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M 1 1 L 7 4 L 1 7 Z" fill="#0f172a" />
+          </marker>
+          <marker id="flowHead" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M 1 1 L 8 4.5 L 1 8 Z" fill="#0284c7" />
+          </marker>
+        </defs>
+
+        <rect width={svgW} height={svgH} fill="#ffffff" />
+        <rect width={svgW} height={svgH} fill="url(#techGrid2D)" />
+
+        {/* Zeichnungskopf oben links */}
+        <g transform="translate(14, 12)">
+          <rect width={Math.min(430, svgW - 28)} height="52" rx="6" fill="#0f172a" />
+          <text x="12" y="23" fontSize="14.5" fontWeight="bold" fill="#fbbf24">
+            POS {positionNumber ? positionNumber : '—'} • {DIR_VECTORS[startDir]?.label}
+          </text>
+          <text x="12" y="42" fontSize="11.5" fill="#e2e8f0">
+            {dichtflaeche ? 'Maße von Dichtfläche' : 'Maßbezug: Allgemein'} | Gesamt: {totalLength} mm
+          </text>
+        </g>
+
+        {nodes.length === 0 ? (
+          <g>
+            <text
+              x={svgW / 2}
+              y={headerSpace + contentH / 2 - 8}
+              fontSize="15"
+              fontWeight="bold"
+              fill="#475569"
+              textAnchor="middle"
+            >
+              Tippe unten auf ein Bauteil, um zu starten
+            </text>
+            <text
+              x={svgW / 2}
+              y={headerSpace + contentH / 2 + 16}
+              fontSize="12"
+              fill="#94a3b8"
+              textAnchor="middle"
+            >
+              Skizze passt sich automatisch an dein Display an
+            </text>
+          </g>
+        ) : (
+          <g transform={`translate(${offsetX}, ${offsetY})`}>
+            {/* Eintrittsrohr + Strömungspfeil */}
+            <line
+              x1={startPoint.x - startVec.dx * 44}
+              y1={startPoint.y - startVec.dy * 44}
+              x2={startPoint.x}
+              y2={startPoint.y}
+              stroke="#334155"
+              strokeWidth={3.5}
+            />
+            <line
+              x1={startPoint.x - startVec.dx * 40}
+              y1={startPoint.y - startVec.dy * 40}
+              x2={startPoint.x - startVec.dx * 12}
+              y2={startPoint.y - startVec.dy * 12}
+              stroke="#0284c7"
+              strokeWidth={3}
+              markerEnd="url(#flowHead)"
+            />
+
+            {/* Austrittsrohr */}
+            <line
+              x1={endPoint.x}
+              y1={endPoint.y}
+              x2={endPoint.x + endVec.dx * 44}
+              y2={endPoint.y + endVec.dy * 44}
+              stroke="#334155"
+              strokeWidth={3.5}
+            />
+
+            {nodes.map((node) => (
+              <SchematicNode
+                key={node.item.id}
+                node={node}
+                isSelected={node.item.id === selectedId}
+                onSelect={() => onSelect(node.item.id)}
+              />
+            ))}
+          </g>
+        )}
+      </svg>
+    </div>
+  );
+}
+
+// ============================================================================
+// Hauptkomponente: Zähler-Skizzen-Baukasten
+// ============================================================================
+export default function App() {
+  const svgRef = useRef(null);
+
+  // URL-Parameter (?pos=14&source=sharepoint|smapone) auslesen
+  const urlContext = useMemo(() => {
+    if (typeof window === 'undefined') return { pos: null, source: null };
+    const params = new URLSearchParams(window.location.search);
+    return {
+      pos: params.get('pos'),
+      source: params.get('source')
+    };
+  }, []);
+
+  // Startet immer mit leerem Blatt (0 Bauteile)
+  const [positionNumber, setPositionNumber] = useState('');
+  const [startDir, setStartDir] = useState('right'); // 'right' | 'down' | 'up'
+  const [dichtflaeche, setDichtflaeche] = useState(true);
+  const [items, setItems] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [zoomLevel, setZoomLevel] = useState(1);
+
+  useEffect(() => {
+    if (urlContext.pos) {
+      const digitsOnly = urlContext.pos.replace(/\D+/g, '');
+      if (digitsOnly) {
+        setPositionNumber(digitsOnly);
+      }
+    }
+  }, [urlContext.pos]);
+
+  const totalLength = useMemo(
+    () => items.reduce((sum, it) => (it.inChain ? sum + (Number(it.length) || 0) : sum), 0),
+    [items]
+  );
+
+  const itemDirections = useMemo(() => {
+    let dir = startDir;
+    return items.map((it) => {
+      const inDir = dir;
+      if (it.typ === '90°-Bogen') {
+        dir = resolveBendOutDir(inDir, it.bendDir);
+      }
+      return { id: it.id, inDir, outDir: dir };
+    });
+  }, [items, startDir]);
+
+  const handleAddItem = (template) => {
+    const prev = items[items.length - 1];
+    const inheritedDn = prev ? Number(prev.dnOut) : 100;
+    const inheritedPn = prev ? Number(prev.pn) : 16;
+    const currentOutDir =
+      itemDirections.length > 0 ? itemDirections[itemDirections.length - 1].outDir : startDir;
+
+    const defaultBendDir =
+      currentOutDir === 'right' || currentOutDir === 'left' ? 'up' : 'right';
+
+    const newId = `el_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+    const newItem = {
+      id: newId,
+      typ: template.typ,
+      dnIn: inheritedDn,
+      dnOut: inheritedDn,
+      pn: inheritedPn,
+      length: template.defaultLen,
+      gSize: template.typ === 'Gaszähler' ? 'G100' : '',
+      meterModel: template.typ === 'Gaszähler' ? 'Elster DKZ' : '',
+      bendDir: template.typ === '90°-Bogen' ? defaultBendDir : null,
+      tag: '',
+      inChain: template.inChain
+    };
+
+    setItems((curr) => [...curr, newItem]);
+    setSelectedId(newId);
+  };
+
+  const handleUpdateItem = (id, patch) => {
+    setItems((curr) => curr.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+  };
+
+  const handleMoveItem = (index, dir) => {
+    const target = index + dir;
+    if (target < 0 || target >= items.length) return;
+    const copy = [...items];
+    const [moved] = copy.splice(index, 1);
+    copy.splice(target, 0, moved);
+    setItems(copy);
+  };
+
+  const handleRemoveItem = (id) => {
+    setItems((curr) => {
+      const next = curr.filter((it) => it.id !== id);
+      if (selectedId === id) {
+        setSelectedId(next[next.length - 1]?.id || null);
+      }
+      return next;
+    });
+  };
+
+  const handleResetAll = () => {
+    setItems([]);
+    setSelectedId(null);
+    setZoomLevel(1);
+  };
+
+  // Hochauflösender PNG-Export auf weißem Hintergrund
+  const handleExportPng = () => {
+    const svgEl = svgRef.current;
+    if (!svgEl) return;
+
+    const serializer = new XMLSerializer();
+    const svgString = serializer.serializeToString(svgEl);
+    const vb = svgEl.viewBox.baseVal;
+    const width = vb && vb.width ? vb.width : 800;
+    const height = vb && vb.height ? vb.height : 380;
+
+    const scale = 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = width * scale;
+    canvas.height = height * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
+
+    const img = new Image();
+    const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+
+    img.onload = () => {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(url);
+
+      const pngUrl = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      const safeNum = positionNumber ? positionNumber.replace(/[^0-9]+/g, '') : 'Unbenannt';
+      link.download = `Skizze_POS_${safeNum}.png`;
+      link.href = pngUrl;
+      link.click();
+    };
+    img.src = url;
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col">
+      {/* ====================================================================
+          KOPFLEISTE: Scrollt normal mit (KEIN position: sticky oder fixed)
+      ==================================================================== */}
+      <header className="bg-slate-900 text-white border-b-4 border-amber-500 shadow">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-black shrink-0">
+              <Gauge className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="font-extrabold text-base tracking-tight">Zähler-Skizzen-Baukasten</h1>
+                {urlContext.source && (
+                  <span className="px-2 py-0.5 text-[11px] font-bold uppercase bg-amber-500/20 text-amber-300 border border-amber-400/40 rounded">
+                    via {urlContext.source}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Bauteile antippen • 90°-Bögen abwinkeln • Skizze als PNG speichern
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleResetAll}
+            className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-red-950 text-slate-200 hover:text-red-200 border border-slate-700 hover:border-red-700 text-xs font-bold flex items-center gap-1.5 transition"
+          >
+            <RotateCcw className="w-4 h-4" />
+            Leeren / Neu starten
+          </button>
+        </div>
+
+        {/* Steuerungsleiste */}
+        <div className="bg-slate-800/95 border-t border-slate-700 px-4 py-2.5">
+          <div className="max-w-6xl mx-auto flex flex-wrap items-center gap-3">
+            {/* Positionsnummer (nur Ziffern) */}
+            <div className="flex items-center gap-2 bg-slate-900 px-3 py-2 rounded-xl border border-slate-700 focus-within:border-amber-500">
+              <span className="text-xs font-black tracking-wide text-slate-400 select-none">POS</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={positionNumber}
+                onChange={(e) => setPositionNumber(e.target.value.replace(/\D+/g, ''))}
+                className="w-16 bg-transparent font-mono font-extrabold text-sm text-amber-400 focus:outline-none"
+                placeholder="Nr."
+                aria-label="Positionsnummer"
+              />
+            </div>
+
+            {/* Grundausrichtung: Horizontal / Vertikal */}
+            <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-700">
+              <span className="text-[11px] font-bold text-slate-400 px-2 hidden sm:inline">Lage:</span>
+              {[
+                { id: 'right', label: 'Horizontal' },
+                { id: 'down', label: 'Vertikal (↓)' },
+                { id: 'up', label: 'Vertikal (↑)' }
+              ].map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setStartDir(opt.id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                    startDir === opt.id
+                      ? 'bg-amber-500 text-slate-950 shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Pflicht-Schalter: Maße von Dichtfläche */}
+            <button
+              type="button"
+              onClick={() => setDichtflaeche(!dichtflaeche)}
+              className={`px-3 py-2 rounded-xl text-xs font-bold border flex items-center gap-1.5 transition ${
+                dichtflaeche
+                  ? 'bg-emerald-950/80 border-emerald-500 text-emerald-200'
+                  : 'bg-slate-900 border-slate-700 text-slate-400'
+              }`}
+            >
+              <CheckCircle2
+                className={`w-4 h-4 ${dichtflaeche ? 'text-emerald-400' : 'text-slate-600'}`}
+              />
+              Maße von Dichtfläche
+            </button>
+
+            {/* Gesamtlängen-Anzeige */}
+            <div className="ml-auto flex items-center gap-1.5 bg-slate-900 px-3 py-2 rounded-xl border border-slate-700">
+              <Ruler className="w-4 h-4 text-amber-400" />
+              <span className="text-xs text-slate-400">Gesamt:</span>
+              <span className="font-mono font-extrabold text-sm text-white">{totalLength} mm</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* ====================================================================
+          HAUPTBEREICH
+      ==================================================================== */}
+      <main className="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-4 py-4 sm:py-5 space-y-4 sm:space-y-5">
+        {/* 1. Smartphone-optimierte Live-2D-Zeichenfläche + Zoom-Leiste */}
+        <section className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-extrabold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
+              <Layers className="w-4 h-4 text-amber-600" />
+              Live-Skizze ({items.length} {items.length === 1 ? 'Teil' : 'Teile'})
+            </span>
+
+            {/* Kompakte Zoom-Leiste */}
+            <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-xl p-1 shadow-xs">
+              <button
+                type="button"
+                onClick={() => setZoomLevel((z) => Math.max(1, Number((z - 0.35).toFixed(2))))}
+                disabled={zoomLevel <= 1}
+                className="p-2 rounded-lg text-slate-700 hover:bg-slate-100 disabled:opacity-30"
+                title="Verkleinern"
+                aria-label="Verkleinern"
+              >
+                <ZoomOut className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoomLevel(1)}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-extrabold flex items-center gap-1 transition ${
+                  zoomLevel === 1
+                    ? 'bg-slate-900 text-amber-400'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+                title="Auf Bildschirmbreite einpassen"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                {zoomLevel === 1 ? '100% Einpassen' : `${Math.round(zoomLevel * 100)}%`}
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoomLevel((z) => Math.min(2.75, Number((z + 0.35).toFixed(2))))}
+                disabled={zoomLevel >= 2.75}
+                className="p-2 rounded-lg text-slate-700 hover:bg-slate-100 disabled:opacity-30"
+                title="Vergrößern"
+                aria-label="Vergrößern"
+              >
+                <ZoomIn className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          <Live2DSchematicCanvas
+            svgRef={svgRef}
+            positionNumber={positionNumber}
+            startDir={startDir}
+            dichtflaeche={dichtflaeche}
+            items={items}
+            totalLength={totalLength}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            zoomLevel={zoomLevel}
+          />
+        </section>
+
+        {/* 2. Große Touch-Buttons zum Hinzufügen von Bauteilen */}
+        <section className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2.5">
+          <div className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+            + Bauteil in Strömungsrichtung hinzufügen:
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2.5">
+            {COMPONENT_CATALOG.map((tmpl) => (
+              <button
+                key={tmpl.typ}
+                type="button"
+                onClick={() => handleAddItem(tmpl)}
+                className="p-3.5 rounded-xl bg-slate-50 hover:bg-amber-50 active:bg-amber-100 border-2 border-slate-200 hover:border-amber-500 flex items-center justify-center gap-2 transition"
+              >
+                <Plus className="w-4 h-4 text-amber-600 shrink-0" />
+                <span className="font-extrabold text-sm text-slate-900">{tmpl.label}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {/* 3. Bauteil-Liste unterhalb der Zeichnung */}
+        {items.length > 0 && (
+          <section className="space-y-2.5">
+            <div className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+              Bauteile, Maße, DN & Bogen-Richtungen anpassen:
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              {items.map((item, idx) => {
+                const isSelected = item.id === selectedId;
+                const dirInfo = itemDirections[idx] || { inDir: 'right', outDir: 'right' };
+                const bendChoices =
+                  item.typ === '90°-Bogen' ? getAvailableBendDirections(dirInfo.inDir) : [];
+
+                return (
+                  <div
+                    key={item.id}
+                    onClick={() => setSelectedId(item.id)}
+                    className={`p-4 rounded-2xl bg-white border-2 transition space-y-3 ${
+                      isSelected ? 'border-amber-500 ring-2 ring-amber-500/20' : 'border-slate-200'
+                    }`}
+                  >
+                    {/* Kartenkopf mit Hoch/Runter & Löschen */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="w-6 h-6 rounded-lg bg-slate-900 text-amber-400 font-black text-xs flex items-center justify-center">
+                          {idx + 1}
+                        </span>
+                        <span className="font-extrabold text-sm text-slate-900">{item.typ}</span>
+                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+                          {dirInfo.inDir === 'up' || dirInfo.inDir === 'down'
+                            ? 'Vertikal'
+                            : 'Horizontal'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          onClick={() => handleMoveItem(idx, -1)}
+                          disabled={idx === 0}
+                          className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-30"
+                          title="Nach oben / vorne"
+                          aria-label="Nach oben"
+                        >
+                          <ArrowUp className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleMoveItem(idx, 1)}
+                          disabled={idx === items.length - 1}
+                          className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-30"
+                          title="Nach unten / hinten"
+                          aria-label="Nach unten"
+                        >
+                          <ArrowDown className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveItem(item.id)}
+                          className="p-2 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 ml-1"
+                          title="Löschen"
+                          aria-label="Löschen"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Richtungsauswahl bei 90°-Bogen */}
+                    {item.typ === '90°-Bogen' && (
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 space-y-1.5"
+                      >
+                        <div className="text-[11px] font-extrabold text-amber-950 uppercase">
+                          Abzweigung des 90°-Bogens:
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {bendChoices.map((choice) => {
+                            const active = dirInfo.outDir === choice.value;
+                            return (
+                              <button
+                                key={choice.value}
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateItem(item.id, { bendDir: choice.value })
+                                }
+                                className={`p-2.5 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 border-2 transition ${
+                                  active
+                                    ? 'bg-slate-900 text-amber-400 border-slate-900'
+                                    : 'bg-white text-slate-800 border-amber-300 hover:bg-amber-100'
+                                }`}
+                              >
+                                {choice.value === 'up' && <CornerUpRight className="w-4 h-4" />}
+                                {choice.value === 'down' && <CornerDownRight className="w-4 h-4" />}
+                                {choice.value === 'right' && <ArrowRight className="w-4 h-4" />}
+                                {choice.value === 'left' && <ArrowLeft className="w-4 h-4" />}
+                                {choice.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Maß-, Nennweiten- & Druckstufen-Eingaben */}
+                    <div
+                      className="grid grid-cols-2 sm:grid-cols-3 gap-2.5"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 mb-1">
+                          Länge (mm)
+                        </label>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          value={item.length}
+                          onChange={(e) =>
+                            handleUpdateItem(item.id, {
+                              length: Number(e.target.value),
+                              inChain: Number(e.target.value) > 0
+                            })
+                          }
+                          className="w-full p-2.5 bg-amber-50/70 border border-amber-300 rounded-xl font-mono font-black text-sm text-slate-900"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 mb-1">
+                          {item.typ === 'Reduzierung' ? 'DN Eingang' : 'Nennweite (DN)'}
+                        </label>
+                        <select
+                          value={item.dnIn}
+                          onChange={(e) => {
+                            const val = Number(e.target.value);
+                            handleUpdateItem(item.id, {
+                              dnIn: val,
+                              dnOut: item.typ === 'Reduzierung' ? item.dnOut : val
+                            });
+                          }}
+                          className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl font-mono font-bold text-sm"
+                        >
+                          {DN_OPTIONS.map((dn) => (
+                            <option key={dn} value={dn}>
+                              DN {dn}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {item.typ === 'Reduzierung' && (
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-500 mb-1">
+                            DN Ausgang
+                          </label>
+                          <select
+                            value={item.dnOut}
+                            onChange={(e) =>
+                              handleUpdateItem(item.id, { dnOut: Number(e.target.value) })
+                            }
+                            className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl font-mono font-bold text-sm"
+                          >
+                            {DN_OPTIONS.map((dn) => (
+                              <option key={dn} value={dn}>
+                                DN {dn}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 mb-1">
+                          Druckstufe
+                        </label>
+                        <select
+                          value={item.pn}
+                          onChange={(e) =>
+                            handleUpdateItem(item.id, { pn: Number(e.target.value) })
+                          }
+                          className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl font-bold text-sm"
+                        >
+                          <option value={16}>PN 16</option>
+                          <option value={10}>PN 10</option>
+                        </select>
+                      </div>
+
+                      {item.typ === 'Gaszähler' && (
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-500 mb-1">
+                            Zählergröße
+                          </label>
+                          <select
+                            value={item.gSize}
+                            onChange={(e) => handleUpdateItem(item.id, { gSize: e.target.value })}
+                            className="w-full p-2.5 bg-blue-50 border border-blue-300 rounded-xl font-bold text-sm text-blue-950"
+                          >
+                            {G_SIZE_OPTIONS.map((g) => (
+                              <option key={g} value={g}>
+                                {g}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Zählermodell & Zusatz-Tags */}
+                    <div
+                      className="flex flex-wrap items-center gap-1.5 pt-0.5"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {item.typ === 'Gaszähler' && (
+                        <select
+                          value={item.meterModel}
+                          onChange={(e) =>
+                            handleUpdateItem(item.id, { meterModel: e.target.value })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-blue-900 border border-blue-200"
+                        >
+                          {METER_MODELS.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+
+                      {['Loser Flansch', '1/2" Stutzen'].map((tagName) => {
+                        const active = item.tag === tagName;
+                        return (
+                          <button
+                            key={tagName}
+                            type="button"
+                            onClick={() =>
+                              handleUpdateItem(item.id, { tag: active ? '' : tagName })
+                            }
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border transition ${
+                              active
+                                ? 'bg-slate-900 text-amber-400 border-slate-900'
+                                : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            {active ? '✓ ' : '+ '}
+                            {tagName}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* 4. Reiner PNG-Export-Bereich */}
+        <section className="bg-slate-900 text-white p-4 rounded-2xl shadow-md flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs text-slate-300">
+            <span className="font-bold text-white">Skizze fertig?</span> Direkt als hochauflösendes Bild für SharePoint oder SmapOne speichern:
+          </div>
+
+          <button
+            type="button"
+            onClick={handleExportPng}
+            disabled={items.length === 0}
+            className="w-full sm:w-auto px-5 py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-extrabold text-sm flex items-center justify-center gap-2 shadow transition"
+          >
+            <Download className="w-5 h-5" />
+            Skizze als PNG speichern
+          </button>
+        </section>
+      </main>
+    </div>
+  );
+}
