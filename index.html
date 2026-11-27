@@ -96,8 +96,8 @@
     // 2D-Pfad- & Bounding-Box-Berechnung für alle Bauteile
     // ============================================================================
     function compute2DLayout(items, startDir) {
-      const STEP_LEN = 144;
-      const BEND_ARM = 72;
+      const STEP_LEN = 164;
+      const BEND_ARM = 82;
 
       let curX = 0;
       let curY = 0;
@@ -179,8 +179,8 @@
           pts.forEach((pt) => {
             minX = Math.min(minX, pt.x - 130);
             maxX = Math.max(maxX, pt.x + 140);
-            minY = Math.min(minY, pt.y - 115);
-            maxY = Math.max(maxY, pt.y + 115);
+            minY = Math.min(minY, pt.y - 120);
+            maxY = Math.max(maxY, pt.y + 120);
           });
         });
       }
@@ -228,8 +228,8 @@
           y: pCorner.y - (nIn.y * sign + nOut.y * sign) * h1 * 0.55
         };
 
-        const labelOffsetX = (-inVec.dx - outVec.dx) * 38;
-        const labelOffsetY = (-inVec.dy - outVec.dy) * 38;
+        const labelOffsetX = (-inVec.dx - outVec.dx) * 42;
+        const labelOffsetY = (-inVec.dy - outVec.dy) * 42;
 
         return (
           <g onClick={onSelect} className="cursor-pointer">
@@ -285,12 +285,15 @@
             </g>
 
             <g transform={`translate(${pCorner.x + labelOffsetX}, ${pCorner.y + labelOffsetY})`}>
-              <rect x={-66} y={-22} width={132} height={42} rx={6} fill="#FFFFFF" stroke="#012F60" strokeWidth={1.4} />
-              <text x={0} y={-5} fontSize={11.5} fontWeight="bold" fill="#012F60" textAnchor="middle">
-                90°-Bogen DN{item.dnIn}
+              <rect x={-64} y={-24} width={128} height={item.inChain ? 54 : 38} rx={6} fill="#FFFFFF" stroke="#012F60" strokeWidth={1.4} />
+              <text x={0} y={-8} fontSize={11.5} fontWeight="bold" fill="#012F60" textAnchor="middle">
+                90°-Bogen
+              </text>
+              <text x={0} y={7} fontSize={11} fontWeight="bold" fill="#012F60" textAnchor="middle">
+                DN{item.dnIn} (PN{item.pn})
               </text>
               {item.inChain && (
-                <text x={0} y={13} fontSize={12} fontWeight="bold" fill="#FF4C4C" textAnchor="middle">
+                <text x={0} y={23} fontSize={12} fontWeight="bold" fill="#FF4C4C" textAnchor="middle">
                   {item.length} mm
                 </text>
               )}
@@ -305,7 +308,7 @@
       const halfW = w / 2;
 
       const dimOffset = isVerticalSeg ? 76 : 70;
-      const labelOffset = isVerticalSeg ? -64 : (hasNozzle ? -72 : -58);
+      const labelOffset = isVerticalSeg ? -56 : (hasNozzle ? -84 : -70);
 
       return (
         <g onClick={onSelect} className="cursor-pointer">
@@ -463,7 +466,7 @@
             <g
               transform={
                 isVerticalSeg
-                  ? `translate(${center.x + labelOffset}, ${center.y})`
+                  ? `translate(${center.x + labelOffset}, ${center.y - (hasNozzle ? 14 : 7)})`
                   : `translate(${center.x}, ${center.y + labelOffset})`
               }
             >
@@ -475,14 +478,24 @@
                 fill="#012F60"
                 textAnchor={isVerticalSeg ? 'end' : 'middle'}
               >
+                {item.typ}
+              </text>
+              <text
+                x={0}
+                y={15}
+                fontSize={11.5}
+                fontWeight="bold"
+                fill="#012F60"
+                textAnchor={isVerticalSeg ? 'end' : 'middle'}
+              >
                 {item.typ === 'Reduzierung'
-                  ? `Reduzierung ${item.dnIn}/${item.dnOut} (PN${item.pn})`
-                  : `${item.typ} DN${item.dnIn} (PN${item.pn})`}
+                  ? `DN${item.dnIn}/${item.dnOut} (PN${item.pn})`
+                  : `DN${item.dnIn} (PN${item.pn})`}
               </text>
               {hasNozzle && (
                 <text
                   x={0}
-                  y={15}
+                  y={30}
                   fontSize={11}
                   fontWeight="bold"
                   fill="#012F60"
