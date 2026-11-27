@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Baukastentool für Zähler Skizzen</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
   <style>
     :root {
       --hne-rot: #FF4C4C;
@@ -324,7 +324,6 @@
               />
             )}
 
-            {/* Eingangsflansch */}
             <rect
               x={-halfW}
               y={-h1 - 10}
@@ -335,7 +334,6 @@
               strokeWidth={1.8}
             />
 
-            {/* Ausgangsflansch */}
             <rect
               x={halfW - 7}
               y={-h2 - 10}
@@ -447,7 +445,6 @@
             )}
           </g>
 
-          {/* Aufrechte Beschriftung */}
           {item.typ === 'Zähler' ? (
             <g transform={`translate(${center.x}, ${center.y})`}>
               <text x={0} y={-11} fontSize={11} fontWeight="bold" fill="#0363FF" textAnchor="middle">
@@ -495,7 +492,6 @@
             </g>
           )}
 
-          {/* Maßlinie für horizontale Segmente */}
           {item.inChain && !isVerticalSeg && (
             <g>
               <line
@@ -537,7 +533,6 @@
             </g>
           )}
 
-          {/* Maßlinie für vertikale Segmente */}
           {item.inChain && isVerticalSeg && (
             <g>
               <line
@@ -814,7 +809,6 @@
           const next = [...curr];
           next[idx] = updatedItem;
 
-          // Bei Reduzierung angrenzende Bauteile an geändertem Flansch automatisch anpassen
           if (updatedItem.typ === 'Reduzierung') {
             if (patch.dnIn !== undefined && idx > 0) {
               const newInDn = Number(patch.dnIn);
@@ -1424,3 +1418,4 @@
   </script>
 </body>
 </html>
+  
