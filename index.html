@@ -87,9 +87,9 @@
       if (item.meterModel === 'Sonstiges') {
         return item.customMeterModel && item.customMeterModel.trim()
           ? item.customMeterModel.trim()
-          : 'Sonstiges';
+          : '';
       }
-      return item.meterModel || 'Zähler';
+      return item.meterModel || '';
     }
 
     // ============================================================================
@@ -427,7 +427,7 @@
                       y={-h1 - 18}
                       width={14}
                       height={18}
-                      fill="#D3F622"
+                      fill="#FFFFFF"
                       stroke="#012F60"
                       strokeWidth={1.8}
                     />
@@ -437,7 +437,7 @@
                       x2={11}
                       y2={-h1 - 18}
                       stroke="#012F60"
-                      strokeWidth={2.4}
+                      strokeWidth={2.2}
                     />
                   </g>
                 )}
@@ -447,9 +447,11 @@
 
           {item.typ === 'Zähler' ? (
             <g transform={`translate(${center.x}, ${center.y})`}>
-              <text x={0} y={-11} fontSize={11} fontWeight="bold" fill="#0363FF" textAnchor="middle">
-                {getMeterDisplayLabel(item)}
-              </text>
+              {getMeterDisplayLabel(item) && (
+                <text x={0} y={-11} fontSize={11} fontWeight="bold" fill="#0363FF" textAnchor="middle">
+                  {getMeterDisplayLabel(item)}
+                </text>
+              )}
               <text x={0} y={6} fontSize={14} fontWeight="bold" fill="#012F60" textAnchor="middle">
                 {item.gSize || 'G100'}
               </text>
@@ -483,7 +485,7 @@
                   y={15}
                   fontSize={11}
                   fontWeight="bold"
-                  fill="#0363FF"
+                  fill="#012F60"
                   textAnchor={isVerticalSeg ? 'end' : 'middle'}
                 >
                   Stutzen {nozzleSize}
@@ -1418,4 +1420,3 @@
   </script>
 </body>
 </html>
-  
