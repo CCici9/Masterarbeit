@@ -96,8 +96,8 @@
     // 2D-Pfad- & Bounding-Box-Berechnung für alle Bauteile
     // ============================================================================
     function compute2DLayout(items, startDir) {
-      const STEP_LEN = 164;
-      const BEND_ARM = 82;
+      const STEP_LEN = 144;
+      const BEND_ARM = 72;
 
       let curX = 0;
       let curY = 0;
@@ -228,8 +228,8 @@
           y: pCorner.y - (nIn.y * sign + nOut.y * sign) * h1 * 0.55
         };
 
-        const labelOffsetX = (-inVec.dx - outVec.dx) * 42;
-        const labelOffsetY = (-inVec.dy - outVec.dy) * 42;
+        const labelOffsetX = (-inVec.dx - outVec.dx) * 38;
+        const labelOffsetY = (-inVec.dy - outVec.dy) * 38;
 
         return (
           <g onClick={onSelect} className="cursor-pointer">
